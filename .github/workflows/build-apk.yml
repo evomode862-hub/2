@@ -1,124 +1,82 @@
-name: Build APK from ZIP
+name: Build All Apps (APK + Windows EXE + Linux)
 
 on:
-  push:
-    paths:
-      - "**/*.zip"
-      - ".github/workflows/build-apk.yml"
   workflow_dispatch:
-
-permissions:
-  contents: read
+  push:
 
 jobs:
-  build-apk:
+  android:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Find ZIP file
-        id: zip
-        shell: bash
+      - uses: actions/checkout@v4
+      - name: Locate app
         run: |
-          ZIP_FILE=$(find . -type f -name "*.zip" \
-            ! -path "./.git/*" \
-            | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "No ZIP file found."
-            exit 1
-          fi
-
-          echo "ZIP found: $ZIP_FILE"
-          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-
-      - name: Extract ZIP
-        shell: bash
-        run: |
-          mkdir -p extracted
-
-          unzip -q "${{ steps.zip.outputs.zip_file }}" \
-            -d extracted
-
-          echo "ZIP extracted successfully."
-
-      - name: Find Android project
-        id: project
-        shell: bash
-        run: |
-          PROJECT_DIR=""
-
-          if [ -f "extracted/settings.gradle" ] || \
-             [ -f "extracted/settings.gradle.kts" ]; then
-            PROJECT_DIR="extracted"
-          else
-            SETTINGS_FILE=$(find extracted -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-              | head -n 1)
-
-            if [ -n "$SETTINGS_FILE" ]; then
-              PROJECT_DIR=$(dirname "$SETTINGS_FILE")
-            fi
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "Could not find an Android/Gradle project."
-            echo "The ZIP must contain settings.gradle or settings.gradle.kts."
-            exit 1
-          fi
-
-          echo "Android project found at: $PROJECT_DIR"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android licenses
-        run: yes | sdkmanager --licenses || true
-
-      - name: Make Gradle executable
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          else
-            echo "gradlew not found."
-            exit 1
-          fi
-
+          APP_DIR=$(dirname "$(find . -name pubspec.yaml -path '*shared_app*' | head -1)")
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - run: yes | flutter doctor --android-licenses || true
       - name: Build APK
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          ./gradlew assembleDebug --stacktrace
-
-      - name: Find APK
-        id: apk
-        working-directory: ${{ steps.project.outputs.project_dir }}
-        shell: bash
-        run: |
-          APK=$(find . -type f -name "*.apk" | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "APK was not generated."
-            exit 1
-          fi
-
-          echo "APK found: $APK"
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+          flutter create --platforms=android --project-name shared_app .
+          flutter pub get
+          flutter build apk --release
+      - uses: actions/upload-artifact@v4
         with:
-          name: built-apk
-          path: ${{ steps.project.outputs.project_dir }}/${{ steps.apk.outputs.apk }}
-          if-no-files-found: error
-          retention-days: 30
+          name: android-apk
+          path: ${{ env.APP_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate app
+        shell: bash
+        run: |
+          APP_DIR=$(dirname "$(find . -name pubspec.yaml -path '*shared_app*' | head -1)")
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Build Windows EXE
+        shell: bash
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name shared_app .
+          flutter pub get
+          flutter build windows --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: ${{ env.APP_DIR }}/build/windows/x64/runner/Release/
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate app
+        run: |
+          APP_DIR=$(dirname "$(find . -name pubspec.yaml -path '*shared_app*' | head -1)")
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev \
+            liblzma-dev libpipewire-0.3-dev libx11-dev libxtst-dev \
+            libturbojpeg0-dev libebook1.2-dev libsecret-1-dev libjsoncpp-dev
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Build Linux
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          flutter config --enable-linux-desktop
+          flutter create --platforms=linux --project-name shared_app .
+          flutter pub get
+          flutter build linux --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-app
+          path: ${{ env.APP_DIR }}/build/linux/x64/release/bundle/
